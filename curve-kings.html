@@ -798,10 +798,28 @@ function holdPose(o, name, t) {
   a.paused = true;
   a.time = clamp(t, 0, 1) * a.getClip().duration;
 }
-new GLTFLoader().load('assets/player.gltf.json',
-  gltf => { for (const o of people()) attachModel(o, gltf); },
-  undefined,
-  err => console.warn('Player model did not load; using the simple players.', err));
+// The model ships as glTF JSON with its binary data inlined as base64. Rebuilding a GLB in memory lets
+// GLTFLoader parse it directly, without fetching a data: URL (which the artifact page's security rules block).
+function jsonToGlb(json) {
+  const raw = atob(json.buffers[0].uri.split(',')[1]);
+  delete json.buffers[0].uri;
+  const pad4 = n => (n + 3) & ~3;
+  const jsonBytes = new TextEncoder().encode(JSON.stringify(json));
+  const jLen = pad4(jsonBytes.length), bLen = pad4(raw.length);
+  const out = new Uint8Array(12 + 8 + jLen + 8 + bLen), dv = new DataView(out.buffer);
+  dv.setUint32(0, 0x46546c67, true); dv.setUint32(4, 2, true); dv.setUint32(8, out.length, true);
+  dv.setUint32(12, jLen, true); dv.setUint32(16, 0x4e4f534a, true);
+  out.fill(0x20, 20, 20 + jLen); out.set(jsonBytes, 20);
+  const b = 20 + jLen;
+  dv.setUint32(b, bLen, true); dv.setUint32(b + 4, 0x004e4942, true);
+  for (let i = 0; i < raw.length; i++) out[b + 8 + i] = raw.charCodeAt(i);
+  return out.buffer;
+}
+fetch('assets/player.gltf.json')
+  .then(r => r.json())
+  .then(json => new Promise((ok, fail) => new GLTFLoader().parse(jsonToGlb(json), '', ok, fail)))
+  .then(gltf => { for (const o of people()) attachModel(o, gltf); })
+  .catch(err => console.warn('Player model did not load; using the simple players.', err));
 
 // ===================== collisions =====================
 const _ab = V(0, 0, 0), _ap = V(0, 0, 0), _cp = V(0, 0, 0), _n = V(0, 0, 0), _vt = V(0, 0, 0);
