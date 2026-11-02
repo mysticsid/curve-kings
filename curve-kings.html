@@ -163,7 +163,26 @@ h1 span { color: var(--gold); }
 .final { font-family: var(--display); font-size: 56px; font-variant-numeric: tabular-nums; }
 .final .y { color: var(--you); } .final .c { color: var(--cpu); }
 .sub { color: var(--muted); font-size: 15px; }
-@media (prefers-reduced-motion: reduce) { #banner { transition: opacity .2s; transform: none; } }
+.diff { display: flex; justify-content: center; gap: 8px; }
+.diff button {
+  font-family: var(--display); font-size: 13px; letter-spacing: 0.1em;
+  color: var(--muted); background: var(--panel); border: 1px solid var(--line);
+  border-radius: 8px; padding: 8px 14px; cursor: pointer;
+}
+.diff button[aria-pressed="true"] { color: var(--night); background: var(--chalk); border-color: var(--chalk); }
+.diff button:focus-visible { outline: 3px solid var(--gold); outline-offset: 2px; }
+#replayTag {
+  position: absolute;
+  top: calc(env(safe-area-inset-top, 0px) + 62px);
+  right: max(12px, env(safe-area-inset-right, 0px));
+  font-family: var(--display); font-size: 13px; letter-spacing: 0.14em;
+  background: var(--panel); border: 1px solid var(--line);
+  padding: 6px 12px; border-radius: 6px;
+  display: flex; gap: 8px; align-items: center;
+}
+#replayTag::before { content: ""; width: 9px; height: 9px; border-radius: 50%; background: var(--miss); animation: blink 1s infinite; }
+@keyframes blink { 50% { opacity: 0.2; } }
+@media (prefers-reduced-motion: reduce) { #banner { transition: opacity .2s; transform: none; } #replayTag::before { animation: none; } }
 </style>
 
 <canvas id="game"></canvas>
@@ -175,6 +194,7 @@ h1 span { color: var(--gold); }
   </div>
   <div id="turnTag" hidden></div>
   <button class="iconBtn" id="mute" aria-label="Toggle sound">SFX</button>
+  <div id="replayTag" hidden>REPLAY · TAP TO SKIP</div>
   <div id="banner"></div>
   <div id="hint"></div>
 </div>
@@ -186,6 +206,11 @@ h1 span { color: var(--gold); }
     <div class="how">
       <div><span class="tag">SHOOT</span><span><b>Swipe from the ball</b> to where you want it to go. <b>Curve your swipe</b> to bend it around the wall. Swipe faster for more power.</span></div>
       <div><span class="tag k">KEEP</span><span><b>Tap or swipe where to dive</b> once the ball is struck. Dive before the kick and the taker will go the other way.</span></div>
+    </div>
+    <div class="diff" role="group" aria-label="Difficulty">
+      <button id="d-easy" data-d="easy">EASY</button>
+      <button id="d-normal" data-d="normal">NORMAL</button>
+      <button id="d-hard" data-d="hard">HARD</button>
     </div>
     <button class="btn" id="playBtn">PLAY</button>
   </div>
@@ -209,6 +234,10 @@ h1 span { color: var(--gold); }
 </script>
 <script type="module">
 import * as THREE from 'three';
+import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
+import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
+import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
+import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
 
 // ===================== constants =====================
 const G = 9.81, BALL_R = 0.11;
@@ -219,6 +248,15 @@ const ROUNDS = 5;
 const KEEPER_Z = 0.35, L_HAND = 2.05;
 const RUNUP = 1.0;
 const COL = { you: 0x2563eb, cpu: 0xdc2626, keeperCpu: 0xf59e0b, keeperYou: 0x22c55e };
+// kDelay/kErr: CPU keeper reaction time and guess error. miss/speed: CPU taker. slow: slow-motion when you keep goal.
+const DIFF = {
+  easy:   { kDelay: 0.32, kErr: 1.4, miss: 0.28, speed: [17, 22], slow: 0.45 },
+  normal: { kDelay: 0.22, kErr: 1.0, miss: 0.16, speed: [19, 26], slow: 0.55 },
+  hard:   { kDelay: 0.15, kErr: 0.7, miss: 0.07, speed: [21, 28], slow: 0.68 },
+};
+let diff = 'normal';
+try { diff = localStorage.getItem('ck-diff') || 'normal'; } catch {}
+if (!DIFF[diff]) diff = 'normal';
 
 const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
 const rand = (a, b) => a + Math.random() * (b - a);
@@ -249,6 +287,16 @@ scene.background = canvasTex(2, 256, (g, w, h) => {
 scene.fog = new THREE.Fog(0x13254a, 80, 190);
 
 const camera = new THREE.PerspectiveCamera(52, 1, 0.1, 400);
+
+// post-processing: floodlights and LED strips glow
+const composer = new EffectComposer(renderer);
+composer.addPass(new RenderPass(scene, camera));
+const bloom = new UnrealBloomPass(new THREE.Vector2(1, 1), 0.5, 0.55, 1.1);
+composer.addPass(bloom);
+composer.addPass(new OutputPass());
+const lampMat = new THREE.MeshBasicMaterial({ color: 0xffffff });
+lampMat.color.setRGB(6, 5.6, 4.8);
+const _up = V(0, 1, 0);
 
 scene.add(new THREE.HemisphereLight(0xcfe0ff, 0x2a4a22, 1.0));
 const sun = new THREE.DirectionalLight(0xfff6e8, 2.4);
@@ -295,32 +343,65 @@ surround.rotation.x = -Math.PI / 2; surround.position.set(0, -0.02, 20);
 scene.add(surround);
 
 // ===================== stadium =====================
-const crowdTex = canvasTex(512, 256, (g, w, h) => {
-  g.fillStyle = '#141a2a'; g.fillRect(0, 0, w, h);
-  const cols = ['#e11d48', '#2563eb', '#f8fafc', '#facc15', '#16a34a', '#f97316', '#a855f7', '#0ea5e9', '#e5e7eb', '#1e293b'];
-  for (let y = 6; y < h; y += 10) {
-    g.fillStyle = '#0b0f1a'; g.fillRect(0, y + 4, w, 2);
-    for (let x = 4; x < w; x += 7) {
-      if (Math.random() < 0.08) continue;
-      g.fillStyle = cols[(Math.random() * cols.length) | 0];
-      g.beginPath(); g.arc(x + rand(-1, 1), y + rand(-1, 1), 2.6, 0, 7); g.fill();
+// Stepped stands with a roof and LED strip; each fan is one instance so the crowd can jump.
+const ROWS = 12, ROW_D = 0.85, ROW_H = 0.5, FRONT_H = 1.4, SEAT_GAP = 0.75;
+const fans = [];
+const stepMats = [new THREE.MeshLambertMaterial({ color: 0x2b3346 }), new THREE.MeshLambertMaterial({ color: 0x232a3a })];
+const darkMat = new THREE.MeshLambertMaterial({ color: 0x141a28 });
+function buildStand(width, bx, bz, yaw) {
+  const grp = new THREE.Group(); grp.position.set(bx, 0, bz); grp.rotation.y = yaw; scene.add(grp);
+  const box = (w, h, d, mat, x, y, z) => { const m = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), mat); m.position.set(x, y, z); grp.add(m); return m; };
+  box(width, FRONT_H, 0.3, darkMat, 0, FRONT_H / 2, -0.15);
+  for (let r = 0; r < ROWS; r++) {
+    const h = FRONT_H + r * ROW_H;
+    box(width, h, ROW_D, stepMats[r % 2], 0, h / 2, -0.3 - (r + 0.5) * ROW_D);
+  }
+  const depth = 0.3 + ROWS * ROW_D, top = FRONT_H + ROWS * ROW_H;
+  box(width, top + 4, 0.4, darkMat, 0, (top + 4) / 2, -depth - 0.2);
+  box(width, 0.3, depth + 3, new THREE.MeshLambertMaterial({ color: 0x0d111b }), 0, top + 4, -depth / 2 + 1.3);
+  box(width, 0.16, 0.16, lampMat, 0, top + 3.78, 2.7);
+  grp.updateMatrixWorld(true);
+  for (let r = 0; r < ROWS; r++) {
+    const h = FRONT_H + r * ROW_H, z = -0.3 - (r + 0.5) * ROW_D;
+    for (let x = -width / 2 + 0.5; x < width / 2 - 0.4; x += SEAT_GAP) {
+      if (Math.random() < 0.14) continue;
+      const p = grp.localToWorld(V(x + rand(-0.12, 0.12), h, z));
+      fans.push({ x: p.x, y: p.y, z: p.z, yaw, ph: Math.random() * 6.28, amp: rand(0.6, 1.2) });
     }
   }
-});
-crowdTex.wrapS = crowdTex.wrapT = THREE.RepeatWrapping;
-function stand(width, bx, bz, yaw) {
-  const L = 42, grp = new THREE.Group();
-  const t = crowdTex.clone(); t.needsUpdate = true; t.repeat.set(width / 12, L / 6);
-  const m = new THREE.Mesh(new THREE.PlaneGeometry(width, L), new THREE.MeshLambertMaterial({ map: t }));
-  m.rotation.x = -0.96;
-  m.position.set(0, L / 2 * Math.sin(0.61), -L / 2 * Math.cos(0.61));
-  grp.add(m); grp.position.set(bx, 0, bz); grp.rotation.y = yaw;
-  scene.add(grp);
 }
-stand(96, 0, -8, 0);
-stand(96, 0, 66, Math.PI);
-stand(100, 37, 20, -Math.PI / 2);
-stand(100, -37, 20, Math.PI / 2);
+buildStand(96, 0, -9, 0);
+buildStand(96, 0, 67, Math.PI);
+buildStand(100, 38, 20, -Math.PI / 2);
+buildStand(100, -38, 20, Math.PI / 2);
+
+const FAN_COLS = [0xe11d48, 0x2563eb, 0xf8fafc, 0xfacc15, 0x16a34a, 0xf97316, 0x1e293b, 0x0ea5e9, 0xdc2626, 0x1d4ed8, 0x94a3b8];
+const SKIN = [0xf1c27d, 0xe0ac69, 0xc68642, 0x8d5524, 0xffdbac];
+const fanBodyGeo = new THREE.BoxGeometry(0.42, 0.55, 0.26); fanBodyGeo.translate(0, 0.5, 0);
+const fanHeadGeo = new THREE.SphereGeometry(0.12, 8, 6); fanHeadGeo.translate(0, 0.92, 0);
+const fanBodies = new THREE.InstancedMesh(fanBodyGeo, new THREE.MeshLambertMaterial(), fans.length);
+const fanHeads = new THREE.InstancedMesh(fanHeadGeo, new THREE.MeshLambertMaterial(), fans.length);
+fanBodies.frustumCulled = fanHeads.frustumCulled = false;
+{
+  const c = new THREE.Color();
+  fans.forEach((f, i) => {
+    fanBodies.setColorAt(i, c.setHex(FAN_COLS[(Math.random() * FAN_COLS.length) | 0]));
+    fanHeads.setColorAt(i, c.setHex(SKIN[(Math.random() * SKIN.length) | 0]));
+  });
+}
+scene.add(fanBodies, fanHeads);
+let crowdExcite = 0, crowdDirty = true;
+const _m4 = new THREE.Matrix4(), _q = new THREE.Quaternion(), _one = V(1, 1, 1), _fp = V(0, 0, 0);
+function updateCrowd(t) {
+  if (crowdExcite < 0.01) { if (!crowdDirty) return; crowdDirty = false; } else crowdDirty = true;
+  fans.forEach((f, i) => {
+    const jump = crowdExcite * f.amp * Math.max(0, Math.sin(t * 9 + f.ph)) * 0.45;
+    _q.setFromAxisAngle(_up, f.yaw);
+    _m4.compose(_fp.set(f.x, f.y + jump, f.z), _q, _one);
+    fanBodies.setMatrixAt(i, _m4); fanHeads.setMatrixAt(i, _m4);
+  });
+  fanBodies.instanceMatrix.needsUpdate = fanHeads.instanceMatrix.needsUpdate = true;
+}
 
 const adTex = canvasTex(1024, 64, (g, w, h) => {
   const items = [['CURVE KINGS', '#0b1324', '#ffd23f'], ['TOP BIN', '#1d4ed8', '#ffffff'], ['SWIPE · BEND · SCORE', '#dc2626', '#ffffff'], ['FREE-KICK DUEL', '#15803d', '#ffffff']];
@@ -345,7 +426,7 @@ adBoard(68, -35.5, 28, Math.PI / 2);
 for (const [x, z] of [[-42, -12], [42, -12], [-42, 58], [42, 58]]) {
   const pole = new THREE.Mesh(new THREE.CylinderGeometry(0.4, 0.6, 34, 8), new THREE.MeshLambertMaterial({ color: 0x55607a }));
   pole.position.set(x, 17, z); scene.add(pole);
-  const lamp = new THREE.Mesh(new THREE.BoxGeometry(6, 3, 0.6), new THREE.MeshBasicMaterial({ color: 0xfff8e0 }));
+  const lamp = new THREE.Mesh(new THREE.BoxGeometry(6, 3, 0.6), lampMat);
   lamp.position.set(x, 35, z); lamp.lookAt(0, 0, 20); scene.add(lamp);
 }
 
@@ -366,13 +447,15 @@ function netQuad(c00, c10, c01, c11, nu, nv, pts) {
   for (let j = 0; j <= nv; j++) pts.push(P(0, j / nv), P(1, j / nv));
 }
 const netGroup = new THREE.Group(); goal.add(netGroup);
+let netGeo, netBase, netPulse = null;
 {
   const pts = [];
   netQuad(V(-HALF_W, GOAL_H, 0), V(HALF_W, GOAL_H, 0), V(-HALF_W, GOAL_H, -NET_TOP_D), V(HALF_W, GOAL_H, -NET_TOP_D), 48, 8, pts);
   netQuad(V(-HALF_W, GOAL_H, -NET_TOP_D), V(HALF_W, GOAL_H, -NET_TOP_D), V(-HALF_W, 0, -NET_BOT_D), V(HALF_W, 0, -NET_BOT_D), 48, 18, pts);
   for (const s of [-1, 1]) netQuad(V(s * HALF_W, 0, 0), V(s * HALF_W, 0, -NET_BOT_D), V(s * HALF_W, GOAL_H, 0), V(s * HALF_W, GOAL_H, -NET_TOP_D), 14, 16, pts);
-  netGroup.add(new THREE.LineSegments(new THREE.BufferGeometry().setFromPoints(pts),
-    new THREE.LineBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.5 })));
+  netGeo = new THREE.BufferGeometry().setFromPoints(pts);
+  netBase = netGeo.attributes.position.array.slice();
+  netGroup.add(new THREE.LineSegments(netGeo, new THREE.LineBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.5 })));
   const rodMat = new THREE.MeshStandardMaterial({ color: 0xdfe6ee, roughness: 0.5 });
   const rod = (a, b) => {
     const d = b.clone().sub(a), m = new THREE.Mesh(new THREE.CylinderGeometry(0.025, 0.025, d.length(), 6), rodMat);
@@ -440,6 +523,72 @@ function trailPush(p) {
   trailGeo.attributes.position.needsUpdate = true;
   trailGeo.setDrawRange(0, trailCount);
 }
+
+// ===================== effects =====================
+// net ripple: vertices near the impact point swing along the ball's direction, pinned at the frame and ground
+let recPulse = null;
+function startNetPulse(p, v) {
+  const params = { x: p.x, y: p.y, z: p.z, amp: clamp(v.length() * 0.03, 0.08, 0.5), dir: v.clone().normalize() };
+  netPulse = { ...params, t: 0 };
+  if (mode !== 'replay') recPulse = { frame: rec.length, params };
+}
+function resetNet() { netPulse = null; netGeo.attributes.position.array.set(netBase); netGeo.attributes.position.needsUpdate = true; }
+function updateNet(dt) {
+  if (!netPulse) return;
+  const np = netPulse; np.t += dt;
+  const k = np.amp * Math.exp(-2.5 * np.t);
+  if (k < 0.002) { resetNet(); return; }
+  const arr = netGeo.attributes.position.array, s = k * Math.cos(np.t * 11);
+  for (let i = 0; i < arr.length; i += 3) {
+    const bx = netBase[i], by = netBase[i + 1], bz = netBase[i + 2];
+    const d2 = (bx - np.x) ** 2 + (by - np.y) ** 2 + (bz - np.z) ** 2;
+    const w = Math.exp(-d2 / 0.9) * Math.min(1, -bz / 0.4) * Math.min(1, by / 0.3 + 0.2) * s;
+    arr[i] = bx + np.dir.x * w; arr[i + 1] = by + np.dir.y * w; arr[i + 2] = bz + np.dir.z * w;
+  }
+  netGeo.attributes.position.needsUpdate = true;
+}
+
+// particles: grass on the kick, sparks on posts and saves, confetti for your goals
+const PMAX = 700;
+const pGeo = new THREE.BufferGeometry();
+pGeo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(PMAX * 3), 3));
+pGeo.setAttribute('color', new THREE.BufferAttribute(new Float32Array(PMAX * 3), 3));
+const particles = new THREE.Points(pGeo, new THREE.PointsMaterial({ size: 0.14, vertexColors: true, transparent: true, depthWrite: false }));
+particles.frustumCulled = false;
+scene.add(particles);
+const parts = [];
+function emit(n, origin, spread, vel, colors, life, grav = G, drag = 1) {
+  for (let i = 0; i < n && parts.length < PMAX; i++) {
+    parts.push({
+      p: origin.clone().add(V(rand(-spread, spread), rand(-spread, spread) * 0.3, rand(-spread, spread))),
+      v: V(rand(-vel, vel), rand(vel * 0.4, vel * 1.4), rand(-vel, vel)),
+      c: new THREE.Color(colors[(Math.random() * colors.length) | 0]),
+      life: life * rand(0.6, 1), grav, drag,
+    });
+  }
+}
+function updateParticles(dt) {
+  const pos = pGeo.attributes.position.array, col = pGeo.attributes.color.array;
+  for (let i = parts.length - 1; i >= 0; i--) {
+    const q = parts[i]; q.life -= dt;
+    if (q.life <= 0) { parts.splice(i, 1); continue; }
+    q.v.y -= q.grav * dt; q.v.multiplyScalar(Math.exp(-q.drag * dt)); q.p.addScaledVector(q.v, dt);
+    if (q.p.y < 0.02) { q.p.y = 0.02; q.v.set(0, 0, 0); }
+  }
+  parts.forEach((q, n) => {
+    pos[n * 3] = q.p.x; pos[n * 3 + 1] = q.p.y; pos[n * 3 + 2] = q.p.z;
+    col[n * 3] = q.c.r; col[n * 3 + 1] = q.c.g; col[n * 3 + 2] = q.c.b;
+  });
+  pGeo.setDrawRange(0, parts.length);
+  pGeo.attributes.position.needsUpdate = pGeo.attributes.color.needsUpdate = true;
+}
+const FX = {
+  grass: p => emit(16, p, 0.08, 1.6, [0x3f8f3a, 0x5cae4f, 0x2f6d2b], 0.7),
+  sparks: p => emit(18, p, 0.05, 2.5, [0xffffff, 0xfff3c4], 0.45, 4, 2),
+  confetti: () => emit(240, V(0, 7, 1), 5, 1.5, [0xffd23f, 0x3b82f6, 0xffffff, 0x3ddc84, 0xff5a5f], 4, 1.2, 1.8),
+};
+let shake = 0;
+function buzz(pattern) { try { navigator.vibrate && navigator.vibrate(pattern); } catch {} }
 
 // ===================== players =====================
 function makePlayer(shirt, shorts, gloves) {
@@ -516,8 +665,20 @@ function applyKeeper() {
 const wall = [];
 for (let i = 0; i < 4; i++) wall.push({ obj: makePlayer(COL.cpu, 0xffffff), x: 0, z: 0, jump: 0, on: false });
 
-const kicker = { obj: makePlayer(COL.cpu, 0xffffff), from: V(0, 0, 0), to: V(0, 0, 0), t: 0 };
+const kicker = { obj: makePlayer(COL.cpu, 0xffffff), from: V(0, 0, 0), to: V(0, 0, 0), t: 0, dur: RUNUP, onKick: null };
 kicker.obj.g.visible = false;
+// Places the taker on a run-up path measured from the ball (back = away from goal, side = to the taker's left).
+function kickerSetup(color, fromBack, fromSide, toBack, toSide, dur, startT, onKick) {
+  const back = V(ballStart.x, 0, ballStart.z).normalize(), side = V(-back.z, 0, back.x);
+  kicker.from.copy(ballStart).addScaledVector(back, fromBack).addScaledVector(side, fromSide).setY(0);
+  kicker.to.copy(ballStart).addScaledVector(back, toBack).addScaledVector(side, toSide).setY(0);
+  Object.assign(kicker, { t: startT, dur, onKick });
+  const o = kicker.obj, d = kicker.to.clone().sub(kicker.from);
+  o.g.visible = true; o.mShirt.color.setHex(color);
+  o.g.position.copy(kicker.from);
+  o.g.rotation.y = Math.atan2(d.x, d.z);
+  for (const j of [...o.hips, ...o.shoulders]) j.rotation.x = 0;
+}
 
 // ===================== collisions =====================
 const _ab = V(0, 0, 0), _ap = V(0, 0, 0), _cp = V(0, 0, 0), _n = V(0, 0, 0), _vt = V(0, 0, 0);
@@ -687,6 +848,7 @@ let turn = 'shoot';      // shoot (you kick) | keep (you're in goal)
 let you = [], cpu = [];
 let flightT = 0, resultT = 0, timeScale = 1, resolved = false, lastPostSfx = -1, simTime = 0;
 let flags = {};
+let rec = [], resolveFrame = 0, replay = null; // recorded frames of the last shot, for the replay
 const camPos = V(0, 2, 30), camLook = V(0, 1, 0), camPosT = V(0, 2, 30), camLookT = V(0, 1, 0);
 
 function placeBall() {
@@ -716,7 +878,7 @@ function placeWall(color) {
   });
 }
 function resetFlight() {
-  flags = { goal: false, keeper: false, wall: false, post: false, crossed: false };
+  flags = { goal: false, keeper: false, wall: false, post: false, crossed: false, netHit: false };
   resolved = false; flightT = 0; timeScale = 1;
 }
 function updateTurnTag() {
@@ -730,8 +892,8 @@ function startShoot() {
   placeWall(COL.cpu);
   keeper.obj.mShirt.color.setHex(COL.keeperCpu);
   keeperReset(clamp(ballStart.x * 0.06, -0.5, 0.5));
-  kicker.obj.g.visible = false;
-  netGroup.visible = true;
+  kickerSetup(COL.you, 0.9, 1.4, 0.4, 0.35, 0.36, 0, null); // waits beside the ball until you swipe
+  netGroup.visible = true; resetNet();
   setCamera(true);
   updateTurnTag();
   setHint('Swipe from the ball toward the goal. Curve your swipe to bend it.');
@@ -742,15 +904,8 @@ function startKeep() {
   placeWall(COL.you);
   keeper.obj.mShirt.color.setHex(COL.keeperYou);
   keeperReset(clamp(ballStart.x * 0.06, -0.5, 0.5));
-  const back = V(ballStart.x, 0, ballStart.z).normalize(), side = V(-back.z, 0, back.x);
-  kicker.from.copy(ballStart).addScaledVector(back, 3.4).addScaledVector(side, -1.3).setY(0);
-  kicker.to.copy(ballStart).addScaledVector(back, 0.45).addScaledVector(side, -0.3).setY(0);
-  kicker.t = -0.6; // short pause before the run-up
-  kicker.obj.g.visible = true;
-  kicker.obj.g.position.copy(kicker.from);
-  const d = kicker.to.clone().sub(kicker.from);
-  kicker.obj.g.rotation.y = Math.atan2(d.x, d.z);
-  netGroup.visible = false;
+  kickerSetup(COL.cpu, 3.4, -1.3, 0.45, -0.3, RUNUP, -0.6, cpuShoot); // short pause, then the run-up
+  netGroup.visible = false; resetNet();
   setCamera(true);
   updateTurnTag();
   setHint('Tap or swipe where you want to dive.');
@@ -761,9 +916,10 @@ function kick(v, spin) {
   ball.v.copy(v); ball.spin = spin; ball.active = true;
   mode = 'flight'; flightT = 0;
   trailReset(); trailPush(ball.p);
-  sfx('kick');
+  rec = []; recPulse = null;
+  sfx('kick'); buzz(15); FX.grass(ball.p);
   if (turn === 'shoot') cpuKeeperReact();
-  timeScale = turn === 'keep' ? 0.55 : 1;
+  timeScale = turn === 'keep' ? DIFF[diff].slow : 1;
   setHint('');
 }
 
@@ -771,8 +927,8 @@ function cpuKeeperReact() {
   const pred = simulateToGoalPlane(ball.p, ball.v, ball.spin);
   if (!pred || Math.abs(pred.x) > HALF_W + 0.8 || pred.y > GOAL_H + 0.6) return;
   const speed = ball.v.length();
-  const err = (0.42 + 0.06 * Math.abs(ball.spin)) * (speed / 24);
-  keeperDive(pred.x + randn() * err, clamp(pred.y + randn() * err * 0.6, 0.1, 2.6), 0.2 + Math.random() * 0.15);
+  const D = DIFF[diff], err = (0.42 + 0.06 * Math.abs(ball.spin)) * (speed / 24) * D.kErr;
+  keeperDive(pred.x + randn() * err, clamp(pred.y + randn() * err * 0.6, 0.1, 2.6), D.kDelay + Math.random() * 0.12);
 }
 
 function cpuShoot() {
@@ -782,8 +938,8 @@ function cpuShoot() {
   for (let i = 0; i < 20; i++) {
     if (i === 8) side = -side; // wall in the way: try the other side
     let tx = side * rand(1.0, 3.3), ty = rand(0.25, 2.15);
-    if (Math.random() < 0.16) { tx += side * rand(0.6, 1.6); ty += rand(0, 0.7); } // occasional miss
-    const speed = rand(19, 26), spin = rand(-9, 9);
+    if (Math.random() < DIFF[diff].miss) { tx += side * rand(0.6, 1.6); ty += rand(0, 0.7); } // occasional miss
+    const speed = rand(...DIFF[diff].speed), spin = rand(-9, 9);
     const v = solveShot(ballStart, tx, ty, speed, spin);
     shot = { v, spin };
     const res = simulateToGoalPlane(ballStart, v, spin, b => {
@@ -808,7 +964,7 @@ function updateRunup(dt) {
   const k = kicker, o = k.obj;
   k.t += dt;
   if (k.t < 0) return;
-  const u = clamp(k.t / RUNUP, 0, 1), e = u * u * (3 - 2 * u);
+  const u = clamp(k.t / k.dur, 0, 1), e = u * u * (3 - 2 * u);
   o.g.position.lerpVectors(k.from, k.to, e);
   const ph = k.t * 13;
   o.hips[0].rotation.x = Math.sin(ph) * 0.8; o.hips[1].rotation.x = -Math.sin(ph) * 0.8;
@@ -816,13 +972,14 @@ function updateRunup(dt) {
   if (u > 0.85) o.hips[1].rotation.x = 0.9 - (u - 0.85) / 0.15 * 2.2;
   if (u >= 1) {
     o.hips[0].rotation.x = 0; o.hips[1].rotation.x = -1.2;
-    cpuShoot();
+    kicker.onKick();
   }
 }
 
 function resolve() {
   if (resolved) return;
-  resolved = true; mode = 'result'; resultT = 2.1; timeScale = 1;
+  resolved = true; mode = 'result'; timeScale = 1;
+  resultT = flags.goal || flags.keeper ? 1.5 : 2.1; // goals and saves get a replay after this
   const scored = flags.goal;
   if (turn === 'shoot') {
     you.push(scored);
@@ -839,6 +996,42 @@ function resolve() {
     else { showBanner('MISSED!', 'good', flags.post ? 'Off the post' : 'Wide of the target'); sfx('cheer'); }
   }
   renderBoard();
+  resolveFrame = rec.length;
+  const good = (turn === 'shoot') === scored;
+  if (good) { crowdExcite = scored || flags.keeper ? 1 : 0.7; buzz([30, 40, 60]); }
+  if (scored && turn === 'shoot') FX.confetti();
+  if (scored) shake = Math.max(shake, 0.06);
+}
+
+// ===================== replay =====================
+function recordFrame() {
+  if (rec.length > 480) return;
+  rec.push({ p: ball.p.clone(), q: ballMesh.quaternion.clone(), k: [keeper.fx, keeper.fy, keeper.angle, keeper.raise], w: wall.map(w => w.jump) });
+}
+function startReplay() {
+  mode = 'replay';
+  replay = { i: 0, end: Math.min(rec.length - 1, resolveFrame + 50), hold: 0, side: ball.p.x >= 0 ? 1 : -1 };
+  bannerEl.classList.remove('show'); bannerTimer = 0;
+  $('replayTag').hidden = false;
+  netGroup.visible = true; resetNet();
+  trailReset();
+  setCamera(true);
+}
+function updateReplay(dt) {
+  const r = replay, prev = r.i;
+  r.i = Math.min(r.end, r.i + dt * 60 * 0.4);
+  if (recPulse && prev < recPulse.frame && r.i >= recPulse.frame) netPulse = { ...recPulse.params, t: 0, slow: true };
+  const i0 = Math.floor(r.i), a = rec[i0], b = rec[Math.min(r.end, i0 + 1)], f = r.i - i0;
+  ball.p.lerpVectors(a.p, b.p, f);
+  ballMesh.quaternion.slerpQuaternions(a.q, b.q, f);
+  [keeper.fx, keeper.fy, keeper.angle, keeper.raise] = a.k.map((v, j) => v + (b.k[j] - v) * f);
+  wall.forEach((w, j) => { w.jump = a.w[j] + (b.w[j] - a.w[j]) * f; });
+  if (r.i >= r.end && (r.hold += dt) > 0.6) endReplay();
+}
+function endReplay() {
+  replay = null;
+  $('replayTag').hidden = true;
+  afterResult();
 }
 
 function decided() {
@@ -873,6 +1066,12 @@ function startMatch() {
   startShoot();
 }
 $('playBtn').addEventListener('click', () => { ac(); startMatch(); });
+function showDiff() { for (const k in DIFF) $('d-' + k).setAttribute('aria-pressed', String(k === diff)); }
+for (const k in DIFF) $('d-' + k).addEventListener('click', () => {
+  diff = k; showDiff();
+  try { localStorage.setItem('ck-diff', k); } catch {}
+});
+showDiff();
 $('againBtn').addEventListener('click', () => { ac(); startMatch(); });
 
 // ===================== simulation step =====================
@@ -892,17 +1091,23 @@ function simStep(dt) {
 
   for (const [a, b] of posts) if (collideCapsule(a, b, POST_R, 0.7, 0.9)) {
     flags.post = true;
-    if (simTime - lastPostSfx > 0.3) { sfx('post'); lastPostSfx = simTime; }
+    if (simTime - lastPostSfx > 0.3) {
+      sfx('post'); lastPostSfx = simTime;
+      FX.sparks(p); shake = Math.max(shake, 0.12); buzz(25);
+      crowdExcite = Math.max(crowdExcite, 0.35);
+    }
   }
   if (wallCollide()) { if (!flags.wall) sfx('thud'); flags.wall = true; }
-  if (keeperCollide()) { if (!flags.keeper) sfx('thud'); flags.keeper = true; }
+  if (keeperCollide()) { if (!flags.keeper) { sfx('thud'); FX.sparks(p); shake = Math.max(shake, 0.08); } flags.keeper = true; }
 
   // side and roof netting from outside the goal
   if (!flags.goal && p.z < 0 && p.z > -NET_BOT_D) {
     if (p.y < GOAL_H && Math.abs(prevX) >= HALF_W + BALL_R && Math.abs(p.x) < HALF_W + BALL_R) {
+      if (!flags.netHit) { flags.netHit = true; startNetPulse(p, v); }
       p.x = Math.sign(prevX) * (HALF_W + BALL_R); v.x *= -0.2; v.z *= 0.4;
     }
     if (Math.abs(p.x) < HALF_W && prevY >= GOAL_H + BALL_R && p.y < GOAL_H + BALL_R && p.z > -NET_TOP_D) {
+      if (!flags.netHit) { flags.netHit = true; startNetPulse(p, v); }
       p.y = GOAL_H + BALL_R; v.y = Math.abs(v.y) * 0.2; v.z *= 0.5;
     }
   }
@@ -911,9 +1116,12 @@ function simStep(dt) {
     if (Math.abs(p.x) < HALF_W - 0.04 && p.y < GOAL_H - 0.04) { flags.goal = true; resolve(); }
   }
   if (flags.goal && p.z < 0) {
-    v.multiplyScalar(Math.exp(-5 * dt));
     const zLim = -(NET_TOP_D + (NET_BOT_D - NET_TOP_D) * (1 - clamp(p.y / GOAL_H, 0, 1))) + BALL_R;
-    if (p.z < zLim) { p.z = zLim; if (v.z < 0) v.z *= -0.2; }
+    if (p.z < zLim) {
+      if (!flags.netHit) { flags.netHit = true; startNetPulse(p, v); }
+      p.z = zLim; if (v.z < 0) v.z *= -0.2;
+    }
+    v.multiplyScalar(Math.exp(-5 * dt));
     const lim = HALF_W - BALL_R;
     if (Math.abs(p.x) > lim) { p.x = Math.sign(p.x) * lim; v.x *= -0.2; }
     if (p.y > GOAL_H - BALL_R) { p.y = GOAL_H - BALL_R; if (v.y > 0) v.y *= -0.2; }
@@ -937,7 +1145,12 @@ function setCamera(snap) {
   camera.fov = aspect < 0.8 ? 66 : 52;
   camera.aspect = aspect;
   camera.updateProjectionMatrix();
-  if (turn === 'shoot') {
+  if (mode === 'replay') {
+    // your kicks: TV angle from behind the goal; CPU kicks: from the touchline side
+    if (turn === 'shoot') camPosT.set(replay.side * 4.2, 1.7, -5.2);
+    else camPosT.set(ballStart.x + (ballStart.x >= 0 ? -9 : 9), 2.2, ballStart.z * 0.45);
+    camLookT.copy(ball.p);
+  } else if (turn === 'shoot') {
     const back = V(ballStart.x, 0, ballStart.z).normalize();
     camPosT.copy(ballStart).addScaledVector(back, 3.4).setY(1.5);
     if (mode === 'flight' || mode === 'result') camPosT.addScaledVector(back, -Math.min(flightT * 3.5, 7));
@@ -945,7 +1158,7 @@ function setCamera(snap) {
     if (ball.active) camLookT.lerp(ball.p, 0.45);
   } else {
     const hfov = 2 * Math.atan(Math.tan(THREE.MathUtils.degToRad(camera.fov) / 2) * aspect);
-    const d = clamp(4.8 / Math.tan(hfov / 2), 3.6, 8.5);
+    const d = clamp(4.8 / Math.tan(hfov / 2), 3.6, 7.6);
     camPosT.set(0, 1.9 + d * 0.12, -d);
     camLookT.set(ballStart.x * 0.2, 0.9, 12);
   }
@@ -963,6 +1176,7 @@ function screenToPlaneZ(x, y, z) {
 }
 function canDive() { return turn === 'keep' && (mode === 'runup' || mode === 'flight') && !keeper.dived; }
 canvas.addEventListener('pointerdown', e => {
+  if (mode === 'replay') { endReplay(); return; }
   if (!(mode === 'aim' || canDive())) return;
   try { canvas.setPointerCapture(e.pointerId); } catch {}
   swipe = { pts: [{ x: e.clientX, y: e.clientY, t: performance.now() }] };
@@ -1009,13 +1223,17 @@ function tryShoot(s) {
   const h = screenToPlaneZ(ex, ey, 0);
   if (!h) return;
   const v = solveShot(ballStart, clamp(h.x, -14, 14), clamp(h.y, BALL_R, 7), speedH, spin);
-  kick(v, spin);
+  // your striker runs in and strikes it
+  mode = 'runup'; setHint('');
+  kicker.onKick = () => kick(v, spin);
 }
 
 // ===================== resize / loop =====================
 function resize() {
   renderer.setSize(innerWidth, innerHeight, false);
   const dpr = Math.min(devicePixelRatio, 2);
+  composer.setPixelRatio(dpr);
+  composer.setSize(innerWidth, innerHeight);
   fx.width = innerWidth * dpr; fx.height = innerHeight * dpr;
   fctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   setCamera(true);
@@ -1040,18 +1258,27 @@ function drawSwipe(dt) {
 let last = performance.now(), acc = 0, clock = 0;
 function frame(now) {
   requestAnimationFrame(frame);
-  const dt = Math.min(0.05, (now - last) / 1000); last = now; clock += dt;
-  if (mode !== 'menu' && mode !== 'over') {
+  const dt = clamp((now - last) / 1000, 0, 0.05); last = now; clock += dt;
+  if (mode === 'replay') updateReplay(dt);
+  else if (mode !== 'menu' && mode !== 'over') {
     acc += dt * timeScale;
     while (acc >= DT) { simStep(DT); acc -= DT; }
+    if (ball.active) recordFrame();
   } else {
     keeper.sway += dt; keeper.fx = keeper.x0 + Math.sin(keeper.sway * 2.2) * 0.1;
   }
-  if (mode === 'result') { resultT -= dt; if (resultT <= 0) afterResult(); }
+  if (mode === 'result') {
+    resultT -= dt;
+    if (resultT <= 0) { if ((flags.goal || flags.keeper) && rec.length > 20) startReplay(); else afterResult(); }
+  }
   if (bannerTimer > 0) { bannerTimer -= dt; if (bannerTimer <= 0) bannerEl.classList.remove('show'); }
 
   ballMesh.position.copy(ball.p);
   if (ball.active) trailPush(ball.p);
+  updateNet(dt * (netPulse && netPulse.slow ? 0.4 : timeScale));
+  updateParticles(dt);
+  crowdExcite = Math.max(0, crowdExcite - dt * 0.3);
+  updateCrowd(clock);
   for (const w of wall) if (w.on) {
     w.obj.g.position.y = w.jump;
     const up = w.jump > 0.02 ? 2.6 : 0.05;
@@ -1065,10 +1292,15 @@ function frame(now) {
   } else if (mode !== 'over') setCamera(false);
   const k = 1 - Math.exp(-5 * dt);
   camPos.lerp(camPosT, k); camLook.lerp(camLookT, k);
-  camera.position.copy(camPos); camera.lookAt(camLook);
+  camera.position.copy(camPos);
+  if (shake > 0.001) {
+    camera.position.x += rand(-1, 1) * shake; camera.position.y += rand(-1, 1) * shake;
+    shake *= Math.exp(-8 * dt);
+  }
+  camera.lookAt(camLook);
 
   drawSwipe(dt);
-  renderer.render(scene, camera);
+  composer.render();
 }
 
 // boot: menu with a demo scene behind it
