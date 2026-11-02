@@ -206,14 +206,20 @@ make_clip('Kick', [
 # Keeper: frame 0 = set position (crouched, gloves forward), frame 10 = full stretch (arms overhead, body straight).
 # The game rotates the whole player sideways for the dive and scrubs this clip with the dive progress.
 make_clip('Keeper_Dive', [
-    (0,  [('move', 'pelvis', (0, 0, -0.16)), ('rot', 'spine_01', 'X', -18),
-          ('rot', 'thigh_l', 'X', -35), ('rot', 'calf_l', 'X', 60), ('rot', 'thigh_r', 'X', -35), ('rot', 'calf_r', 'X', 60),
-          ('rot', 'thigh_l', 'Y', -8), ('rot', 'thigh_r', 'Y', 8),
-          ('rot', 'upperarm_l', 'X', -55), ('rot', 'upperarm_r', 'X', -55),
-          ('rot', 'upperarm_l', 'Y', -20), ('rot', 'upperarm_r', 'Y', 20),
-          ('rot', 'lowerarm_l', 'X', -35), ('rot', 'lowerarm_r', 'X', -35)]),
-    (10, [('rot', 'upperarm_l', 'Y', -160), ('rot', 'upperarm_r', 'Y', 160),
-          ('rot', 'thigh_l', 'Y', 6), ('rot', 'thigh_r', 'Y', -6), ('rot', 'thigh_r', 'X', -20), ('rot', 'calf_r', 'X', 30)]),
+    # set position: knees bent, weight forward, arms low and out to the sides, palms toward the ball
+    (0,  [('move', 'pelvis', (0, 0, -0.13)), ('rot', 'spine_01', 'X', -14),
+          ('rot', 'thigh_l', 'X', -30), ('rot', 'calf_l', 'X', 52), ('rot', 'thigh_r', 'X', -30), ('rot', 'calf_r', 'X', 52),
+          ('rot', 'foot_l', 'X', -20), ('rot', 'foot_r', 'X', -20),
+          ('rot', 'thigh_l', 'Y', -7), ('rot', 'thigh_r', 'Y', 7),
+          ('rot', 'upperarm_l', 'Y', -38), ('rot', 'upperarm_r', 'Y', 38),
+          ('rot', 'upperarm_l', 'X', -22), ('rot', 'upperarm_r', 'X', -22),
+          ('rot', 'lowerarm_l', 'X', -18), ('rot', 'lowerarm_r', 'X', -18)]),
+    # full stretch: arms overhead and slightly forward, body extended, trailing leg bent
+    (10, [('rot', 'spine_01', 'X', 6), ('rot', 'spine_03', 'X', 6),
+          ('rot', 'upperarm_l', 'Y', -158), ('rot', 'upperarm_r', 'Y', 158),
+          ('rot', 'upperarm_l', 'X', -12), ('rot', 'upperarm_r', 'X', -12),
+          ('rot', 'thigh_l', 'Y', 5), ('rot', 'thigh_r', 'X', 18), ('rot', 'calf_r', 'X', 40),
+          ('rot', 'foot_l', 'X', 25), ('rot', 'foot_r', 'X', 25)]),
 ])
 
 # Wall: frame 0 = standing guard (hands crossed low), frame 10 = jump with arms up.
@@ -247,7 +253,7 @@ def facing_yaw(src, f):
     fwd = lat.cross(Vector((0, 0, 1)))  # left x up = forward
     return math.atan2(fwd.y, fwd.x)
 
-def retarget(bvh, name, window=None, kick=False, inplace=True, loop_trim=0):
+def retarget(bvh, name, window=None, kick=False, inplace=True, loop_trim=0, jump=False):
     before = set(bpy.data.objects)
     bpy.ops.import_anim.bvh(filepath=os.path.join(CMU, bvh), global_scale=1.0, frame_start=1, use_fps_scale=False,
                             update_scene_fps=False, update_scene_duration=False, rotate_mode='NATIVE', axis_forward='-Z', axis_up='Y')
@@ -274,6 +280,14 @@ def retarget(bvh, name, window=None, kick=False, inplace=True, loop_trim=0):
                     if v > best: best, contact = v, f
                 prevp[s] = p
         start, end = max(2, contact - int(0.55 * 120)), min(f_end, contact + int(0.65 * 120))
+    elif jump:  # crouch -> take-off -> apex -> landing; the game moves the body up, so height is dropped
+        zs = []
+        for f in range(2, f_end + 1):
+            scene.frame_set(f); zs.append((f, (sw @ sp['Hips'].head).z))
+        apex = max(zs, key=lambda t: t[1])[0]
+        bottom = min((t for t in zs if apex - 100 <= t[0] < apex), key=lambda t: t[1])[0]
+        start, end = max(2, bottom - 20), min(f_end, apex + 70)
+        log(f'jump {bvh}: crouch {bottom}, apex {apex}, apex at {(apex - start) / 120:.2f}s into the clip')
     elif window:
         start, end = max(2, int(window[0] * 120)), min(f_end, int(window[1] * 120))
     else:
@@ -312,6 +326,7 @@ def retarget(bvh, name, window=None, kick=False, inplace=True, loop_trim=0):
                     d = CA @ ((hp - hips_start) * ratio)
                     if inplace: d.x = d.y = 0
                     d.z = (hp.z - hips_ref.z) * ratio
+                    if jump: d.z = min(d.z, 0)  # keep the crouch, drop the rise (the game lifts the whole player)
                     head = b.matrix_local.translation + (tw_inv @ d)
                 D[b.name] = Matrix.Translation(head) @ (tw_inv @ q_world).to_matrix().to_4x4()
             else:
@@ -333,6 +348,7 @@ MOCAP = [  # (file, clip name, options)
     ('79_69.bvh', 'Celebrate', dict(window=(0.5, 5.0))),
     ('79_71.bvh', 'No', dict(window=(0.5, 5.0))),
     ('77_02.bvh', 'Idle', dict(window=(1.0, 7.0))),
+    ('16_01.bvh', 'Wall_Jump', dict(jump=True)),
 ]
 for f, n, opt in MOCAP:
     retarget(f, n, **opt)
@@ -352,7 +368,7 @@ if RENDER:
         d = Vector((0, 0, 1.0)) - Vector(loc)
         co.rotation_euler = d.to_track_quat('-Z', 'Y').to_euler()
         cams[name] = co
-    shots = [('Idle', 0, 'front')] + [('Kick', k, 'side') for k in range(0, 37, 4)] + [('Celebrate', 40, 'front'), ('No', 40, 'front'),
+    shots = [('Idle', 0, 'front'), ('Wall_Jump', 0, 'front'), ('Wall_Jump', 8, 'front'), ('Wall_Jump', 14, 'side'), ('Celebrate', 40, 'front'), ('No', 40, 'front'),
              ('Keeper_Dive', 0, 'front'), ('Keeper_Dive', 0, 'side'), ('Keeper_Dive', 10, 'front'),
              ('Wall_Jump', 0, 'front'), ('Wall_Jump', 10, 'front'), ('Jog', 6, 'side')]
     for act, frame, cam in shots:
