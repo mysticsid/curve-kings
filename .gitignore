@@ -1,0 +1,7 @@
+# This folder also holds the Blender and Git program files.
+# Ignore everything by default, then list only the game's own files.
+/*
+!/.gitignore
+!/curve-kings.html
+!/assets/
+!/README.md
