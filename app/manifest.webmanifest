@@ -1,0 +1,15 @@
+{
+  "name": "Curve Kings",
+  "short_name": "Curve Kings",
+  "description": "3D free-kick duel: curl shots around the wall and dive to save.",
+  "start_url": "./",
+  "scope": "./",
+  "display": "fullscreen",
+  "orientation": "portrait",
+  "background_color": "#0b1324",
+  "theme_color": "#0b1324",
+  "icons": [
+    { "src": "icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any maskable" },
+    { "src": "icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any maskable" }
+  ]
+}
