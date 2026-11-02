@@ -224,6 +224,119 @@ make_clip('Wall_Jump', [
           ('rot', 'thigh_l', 'X', 10), ('rot', 'calf_l', 'X', 30), ('rot', 'thigh_r', 'X', 10), ('rot', 'calf_r', 'X', 30)]),
 ])
 
+# ---------------------------------------------------------------- motion capture (CMU database, BVH)
+# Retargeting: each mapped bone copies the source bone's world-space rotation *relative to the source T-pose*
+# (frame 1 of every CMU file) onto our bone's rest pose (also a T-pose). Hips height is scaled to our player.
+CMU = os.path.join(DL, 'cmu')
+MAP = {
+    'pelvis': 'Hips', 'spine_01': 'LowerBack', 'spine_02': 'Spine', 'spine_03': 'Spine1', 'neck_01': 'Neck', 'Head': 'Head',
+    'clavicle_l': 'LeftShoulder', 'upperarm_l': 'LeftArm', 'lowerarm_l': 'LeftForeArm', 'hand_l': 'LeftHand',
+    'clavicle_r': 'RightShoulder', 'upperarm_r': 'RightArm', 'lowerarm_r': 'RightForeArm', 'hand_r': 'RightHand',
+    'thigh_l': 'LeftUpLeg', 'calf_l': 'LeftLeg', 'foot_l': 'LeftFoot', 'ball_l': 'LeftToeBase',
+    'thigh_r': 'RightUpLeg', 'calf_r': 'RightLeg', 'foot_r': 'RightFoot', 'ball_r': 'RightToeBase',
+}
+from mathutils import Quaternion
+ab = arm.data.bones
+log('target rest upperarm_l dir', tuple(round(c, 2) for c in (ab['upperarm_l'].tail_local - ab['upperarm_l'].head_local).normalized()))
+
+def facing_yaw(src, f):
+    scene.frame_set(f)
+    l = src.matrix_world @ src.pose.bones['LeftUpLeg'].head
+    r = src.matrix_world @ src.pose.bones['RightUpLeg'].head
+    lat = l - r                      # points to the character's left
+    fwd = lat.cross(Vector((0, 0, 1)))  # left x up = forward
+    return math.atan2(fwd.y, fwd.x)
+
+def retarget(bvh, name, window=None, kick=False, inplace=True, loop_trim=0):
+    before = set(bpy.data.objects)
+    bpy.ops.import_anim.bvh(filepath=os.path.join(CMU, bvh), global_scale=1.0, frame_start=1, use_fps_scale=False,
+                            update_scene_fps=False, update_scene_duration=False, rotate_mode='NATIVE', axis_forward='-Z', axis_up='Y')
+    src = next(o for o in set(bpy.data.objects) - before if o.type == 'ARMATURE')
+    sact = src.animation_data.action
+    f_end = int(sact.frame_range[1])
+    sw = src.matrix_world
+    sp = src.pose.bones
+    # reference T-pose (frame 1)
+    scene.frame_set(1)
+    ref = {s: (sw @ sp[s].matrix).to_quaternion() for s in MAP.values()}
+    hips_ref = sw @ sp['Hips'].head
+    ratio = (arm.matrix_world @ ab['pelvis'].head_local).z / max(hips_ref.z, 1e-3)
+    # choose the frame range (source runs at 120 fps; we sample at 30 fps)
+    contact = None
+    if kick:  # strike frame = fastest foot movement
+        best, prevp = 0, {}
+        for f in range(2, f_end + 1):
+            scene.frame_set(f)
+            for s in ('LeftFoot', 'RightFoot'):
+                p = sw @ sp[s].head
+                if s in prevp:
+                    v = (p - prevp[s]).length
+                    if v > best: best, contact = v, f
+                prevp[s] = p
+        start, end = max(2, contact - int(0.55 * 120)), min(f_end, contact + int(0.65 * 120))
+    elif window:
+        start, end = max(2, int(window[0] * 120)), min(f_end, int(window[1] * 120))
+    else:
+        start, end = 2, f_end - loop_trim
+    # A turns the source T-pose to face our -Y so bone deltas rotate about the right axes;
+    # C then cancels whatever turn the performer made, so the clip faces forward at the key frame.
+    face_frame = contact or (start + end) // 2
+    yaw_ref = facing_yaw(src, 1)
+    A = Quaternion((0, 0, 1), -math.pi / 2 - yaw_ref)
+    C = Quaternion((0, 0, 1), -(facing_yaw(src, face_frame) - yaw_ref))
+    CA, A_inv = C @ A, A.inverted()
+    hips_start = None
+
+    if name in bpy.data.actions: bpy.data.actions.remove(bpy.data.actions[name])
+    act = bpy.data.actions.new(name); act.use_fake_user = True
+    use_action(act)
+    tw_inv = arm.matrix_world.to_quaternion().inverted()
+    rest_q = {b.name: (arm.matrix_world @ b.matrix_local).to_quaternion() for b in ab}
+    order = [b for b in ab]  # Blender lists bones parents-first
+    out_frame = 0
+    for f in range(start, end + 1, 4):
+        scene.frame_set(f)
+        D = {}
+        for b in order:
+            P = D.get(b.parent.name) if b.parent else None
+            rest_rel = (b.parent.matrix_local.inverted() @ b.matrix_local) if b.parent else b.matrix_local
+            chain = (P @ rest_rel) if P is not None else b.matrix_local.copy()
+            s = MAP.get(b.name)
+            if s:
+                q_src = (sw @ sp[s].matrix).to_quaternion()
+                q_world = CA @ q_src @ ref[s].inverted() @ A_inv @ rest_q[b.name]
+                head = chain.translation.copy()
+                if b.name == 'pelvis':
+                    hp = sw @ sp['Hips'].head
+                    if hips_start is None: hips_start = hp.copy()
+                    d = CA @ ((hp - hips_start) * ratio)
+                    if inplace: d.x = d.y = 0
+                    d.z = (hp.z - hips_ref.z) * ratio
+                    head = b.matrix_local.translation + (tw_inv @ d)
+                D[b.name] = Matrix.Translation(head) @ (tw_inv @ q_world).to_matrix().to_4x4()
+            else:
+                D[b.name] = chain
+            basis = chain.inverted() @ D[b.name]
+            pb_ = pb[b.name]
+            pb_.rotation_quaternion = basis.to_quaternion()
+            pb_.location = basis.translation if b.name == 'pelvis' else Vector((0, 0, 0))
+            pb_.keyframe_insert('rotation_quaternion', frame=out_frame, group=b.name)
+            pb_.keyframe_insert('location', frame=out_frame, group=b.name)
+        out_frame += 1
+    arm.animation_data.action = None
+    bpy.data.objects.remove(src)
+    log(f'mocap {name}: {bvh} frames {start}-{end} -> {out_frame} keys' + (f', strike at key {(contact - start) // 4}' if contact else ''))
+
+MOCAP = [  # (file, clip name, options)
+    ('10_02.bvh', 'Kick', dict(kick=True)),
+    ('16_35.bvh', 'Jog', dict(loop_trim=0)),
+    ('79_69.bvh', 'Celebrate', dict(window=(0.5, 5.0))),
+    ('79_71.bvh', 'No', dict(window=(0.5, 5.0))),
+    ('77_02.bvh', 'Idle', dict(window=(1.0, 7.0))),
+]
+for f, n, opt in MOCAP:
+    retarget(f, n, **opt)
+
 # ---------------------------------------------------------------- preview renders (to check poses)
 if RENDER:
     os.makedirs(RENDER_DIR, exist_ok=True)
@@ -239,7 +352,7 @@ if RENDER:
         d = Vector((0, 0, 1.0)) - Vector(loc)
         co.rotation_euler = d.to_track_quat('-Z', 'Y').to_euler()
         cams[name] = co
-    shots = [('Idle', 0, 'front'), ('Kick', 6, 'side'), ('Kick', 12, 'side'), ('Kick', 18, 'side'),
+    shots = [('Idle', 0, 'front')] + [('Kick', k, 'side') for k in range(0, 37, 4)] + [('Celebrate', 40, 'front'), ('No', 40, 'front'),
              ('Keeper_Dive', 0, 'front'), ('Keeper_Dive', 0, 'side'), ('Keeper_Dive', 10, 'front'),
              ('Wall_Jump', 0, 'front'), ('Wall_Jump', 10, 'front'), ('Jog', 6, 'side')]
     for act, frame, cam in shots:
