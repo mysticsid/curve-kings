@@ -68,14 +68,17 @@ for o in new:
 # ---------------------------------------------------------------- kit regions
 # Limbs are decided by bone, but hem lines by height so the kit edges are straight.
 WAIST, SHORTS_HEM, SOCK_TOP, BOOT_TOP = 0.99, 0.6, 0.47, 0.11
-def region_for(bone, z):
+COLLAR, SLEEVE_END = 1.5, 0.27  # collar height; sleeve trim within this distance (m) of the elbow
+def region_for(bone, z, elbow_dist=9):
     if bone.startswith(('hand_', 'index_', 'middle_', 'ring_', 'pinky_', 'thumb_')): return 'Hands'
     if bone.startswith(('lowerarm_', 'neck_', 'Head')) or bone == 'head': return 'Skin'
-    if bone.startswith(('upperarm_', 'clavicle_')): return 'Shirt'
-    if z > WAIST: return 'Shirt' if bone.startswith(('spine_', 'pelvis')) else 'Skin'
-    if z > SHORTS_HEM: return 'Shorts'
+    if bone.startswith(('upperarm_', 'clavicle_')): return 'Trim' if elbow_dist < SLEEVE_END - 0.2 else 'Shirt'
+    if z > WAIST:
+        if not bone.startswith(('spine_', 'pelvis')): return 'Skin'
+        return 'Trim' if z > COLLAR else 'Shirt'
+    if z > SHORTS_HEM: return 'Trim' if z < SHORTS_HEM + 0.035 else 'Shorts'
     if z > SOCK_TOP: return 'Skin'
-    if z > BOOT_TOP and not bone.startswith(('foot_', 'ball_')): return 'Socks'
+    if z > BOOT_TOP and not bone.startswith(('foot_', 'ball_')): return 'Trim' if z > SOCK_TOP - 0.03 else 'Socks'
     return 'Boots'
 
 skin_mat = body.data.materials[0]
@@ -106,6 +109,7 @@ mats = {'Skin': skin_mat,
         'Shorts': fabric('Shorts', (0.95, 0.95, 0.95), 0.7),
         'Socks': fabric('Socks', (0.1, 0.3, 0.85), 0.85),
         'Boots': fabric('Boots', (0.03, 0.03, 0.035), 0.35),
+        'Trim': fabric('Trim', (0.95, 0.95, 0.95), 0.7),
         'Hands': fabric('Hands', (0.55, 0.38, 0.28), 0.6)}
 order = list(mats)
 body.data.materials.clear()
@@ -117,11 +121,13 @@ vbone = []
 for v in mesh.vertices:
     best = max(v.groups, key=lambda g: g.weight, default=None)
     vbone.append(groups.get(best.group, '') if best else '')
+elbows = [arm.matrix_world @ arm.data.bones[n].head_local for n in ('lowerarm_l', 'lowerarm_r')]
 counts = {}
 for p in mesh.polygons:
     tally = {}
     for vi in p.vertices: tally[vbone[vi]] = tally.get(vbone[vi], 0) + 1
-    r = region_for(max(tally, key=tally.get), (body.matrix_world @ p.center).z)
+    c = body.matrix_world @ p.center
+    r = region_for(max(tally, key=tally.get), c.z, min((c - e).length for e in elbows))
     p.material_index = order.index(r)
     counts[r] = counts.get(r, 0) + 1
 log('kit faces', counts)
