@@ -1,0 +1,14 @@
+Third-party assets (all CC0 1.0 public domain, free for commercial use)
+
+player.gltf.json
+  Body and hair: "Universal Base Characters" by Quaternius - https://quaternius.com
+  Idle, jog, sprint, celebration clips: "Universal Animation Library" 1 and 2 by Quaternius
+  Kit, keeper and wall animations added in tools/build_player.py
+  Motion capture (kick, run, idle, happy/sad reactions): CMU Graphics Lab Motion Capture Database,
+    http://mocap.cs.cmu.edu - funded by NSF EIA-0196217. BVH conversion by Bruce Hahne.
+
+grass_normal.jpg, grass_detail.jpg
+  "Grass Ground" texture by Poly Haven - https://polyhaven.com
+
+stadium_env.jpg
+  "Stadium 01" HDRI by Poly Haven - https://polyhaven.com
